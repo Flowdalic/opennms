@@ -17,12 +17,7 @@
   <dependencies>
       <dependency>
         <groupId>org.igniterealtime.smack</groupId>
-        <artifactId>smack-core</artifactId>
-        <version>${smackVersion}</version>
-      </dependency>
-      <dependency>
-        <groupId>org.igniterealtime.smack</groupId>
-        <artifactId>smack-resolver-javax</artifactId>
+        <artifactId>smack-java7</artifactId>
         <version>${smackVersion}</version>
       </dependency>
       <dependency>
@@ -34,6 +29,11 @@
         <groupId>org.igniterealtime.smack</groupId>
         <artifactId>smack-extensions</artifactId>
         <version>${smackVersion}</version>
+      </dependency>
+      <dependency>
+        <groupId>eu.geekplace.javapinning</groupId>
+        <artifactId>java-pinning-java7</artifactId>
+        <version>1.1.0-alpha1</version>
       </dependency>
   </dependencies>
 </project>

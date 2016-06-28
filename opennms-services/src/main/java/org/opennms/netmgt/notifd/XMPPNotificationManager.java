@@ -45,24 +45,34 @@ import javax.net.ssl.TrustManager;
 import javax.net.ssl.X509TrustManager;
 
 import org.apache.commons.io.IOUtils;
-import org.jivesoftware.smack.Chat;
-import org.jivesoftware.smack.ChatManager;
-import org.jivesoftware.smack.ConnectionConfiguration;
+import org.jivesoftware.smack.chat.Chat;
+import org.jivesoftware.smack.chat.ChatManager;
 import org.jivesoftware.smack.ConnectionConfiguration.SecurityMode;
 import org.jivesoftware.smack.ConnectionListener;
-import org.jivesoftware.smack.MessageListener;
 import org.jivesoftware.smack.SmackConfiguration;
 import org.jivesoftware.smack.SmackException.NoResponseException;
 import org.jivesoftware.smack.SmackException.NotConnectedException;
 import org.jivesoftware.smack.XMPPConnection;
 import org.jivesoftware.smack.XMPPException;
+import org.jivesoftware.smack.chat.ChatMessageListener;
 import org.jivesoftware.smack.packet.Message;
 import org.jivesoftware.smack.tcp.XMPPTCPConnection;
+import org.jivesoftware.smack.tcp.XMPPTCPConnectionConfiguration;
+import org.jivesoftware.smack.util.TLSUtils;
 import org.jivesoftware.smackx.muc.MultiUserChat;
+import org.jivesoftware.smackx.muc.MultiUserChatException.NotAMucServiceException;
+import org.jivesoftware.smackx.muc.MultiUserChatManager;
+import org.jxmpp.jid.DomainBareJid;
+import org.jxmpp.jid.EntityJid;
+import org.jxmpp.jid.impl.JidCreate;
+import org.jxmpp.jid.parts.Resourcepart;
+import org.jxmpp.stringprep.XmppStringprepException;
 import org.opennms.core.logging.Logging;
 import org.opennms.core.utils.ConfigFileConstants;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+
+import eu.geekplace.javapinning.java7.Java7Pinning;
 
 /**
  * Singleton class used to send messages to an XMPP Server. Used by
@@ -79,8 +89,6 @@ public class XMPPNotificationManager {
 	private final Properties props = new Properties();
 
 	private static final String LOG4J_CATEGORY = "notifd";
-
-	private static final String XMPP_RESOURCE = "notifd";
 
 	private static final String XMPP_PORT = "5222";
 
@@ -117,11 +125,7 @@ public class XMPPNotificationManager {
                 @Override
         public void reconnectionFailed(Exception e) {
             LOG.warn("XMPP reconnection failed", e);
-            try {
-                xmpp.disconnect();
-            } catch (NotConnectedException ex) {
-                LOG.error("XMPP disconnect failed", ex);
-            }
+             xmpp.disconnect();
             instance = null;
         }
 
@@ -131,14 +135,15 @@ public class XMPPNotificationManager {
         }
 
         @Override
-        public void authenticated(XMPPConnection conn) {
-            LOG.debug("XMPP authenticated");
+        public void authenticated(XMPPConnection conn, boolean resumed) {
+            LOG.debug("XMPP authenticated resumed=" + resumed);
         }
 
         @Override
         public void connected(XMPPConnection conn) {
             LOG.debug("XMPP connected");
         }
+
 	};
 
 	/**
@@ -181,38 +186,48 @@ public class XMPPNotificationManager {
 			xmppPassword = this.props.getProperty("xmpp.pass");
 			xmppPort = Integer.valueOf(this.props.getProperty("xmpp.port", XMPP_PORT));
 
-			ConnectionConfiguration xmppConfig = new ConnectionConfiguration(xmppServer, xmppPort, xmppServiceName);
+			XMPPTCPConnectionConfiguration.Builder xmppConfig = XMPPTCPConnectionConfiguration.builder();
+
+			DomainBareJid xmppDomain;
+			try {
+				xmppDomain = JidCreate.domainBareFrom(xmppServiceName);
+			} catch (XmppStringprepException e) {
+				throw new IllegalArgumentException(e);
+			}
+			xmppConfig.setHost(xmppServer).setPort(xmppPort).setXmppDomain(xmppDomain);
 
 			boolean debuggerEnabled = Boolean.parseBoolean(props.getProperty("xmpp.debuggerEnabled"));
 			xmppConfig.setDebuggerEnabled(debuggerEnabled);
 
 			if (Boolean.parseBoolean(props.getProperty("xmpp.TLSEnabled"))) {
-				xmppConfig.setSecurityMode(SecurityMode.enabled);
+				xmppConfig.setSecurityMode(SecurityMode.required);
 			} else {
 				xmppConfig.setSecurityMode(SecurityMode.disabled);
 			}
 
-			if (Boolean.parseBoolean(props.getProperty("xmpp.selfSignedCertificateEnabled"))) {
-	            try {
-	                SSLContext ctx = SSLContext.getInstance("TLS");
-	                ctx.init(null, new TrustManager[] { new LocalSSLTrustManager() }, null);
-	                xmppConfig.setCustomSSLContext(ctx);
-	            } catch (NoSuchAlgorithmException | KeyManagementException e) {
-	                LOG.error("Failed to create a custom SSL context", e);
-	            }
+			String tlsCertPin = props.getProperty("xmpp.TLSCertPin");
+			if (tlsCertPin != null && !tlsCertPin.isEmpty()) {
+				SSLContext ctx;
+				try {
+					ctx = Java7Pinning.forPin(tlsCertPin);
+				} catch (KeyManagementException | NoSuchAlgorithmException e) {
+					throw new AssertionError(e);
+				}
+				xmppConfig.setCustomSSLContext(ctx);
+			}
+			// TODO Remove 'xmpp.selfSignedCertificateEnabled' in a future release since it is deprecated.
+			else if (Boolean.parseBoolean(props.getProperty("xmpp.selfSignedCertificateEnabled"))) {
+				try {
+					TLSUtils.acceptAllCertificates(xmppConfig);
+				} catch (KeyManagementException | NoSuchAlgorithmException e) {
+					throw new AssertionError(e);
+				}
 			}
 
-			// Remove all SALS mechanisms when SASL is disabled
-			// There is currently no option to do this on a per-connection basis
-			// so we must do it globally.
-			if (!Boolean.parseBoolean(props.getProperty("xmpp.SASLEnabled", "true"))) {
-			    LOG.info("Removing all SALS mechanisms from Smack.");
-			    SmackConfiguration.removeSaslMechs(SmackConfiguration.getSaslMechs());
-			}
+			XMPPTCPConnectionConfiguration buildXmppConfig = xmppConfig.build();
+			LOG.debug("XMPP Manager connection config: {}", buildXmppConfig);
 
-			LOG.debug("XMPP Manager connection config: {}", xmppConfig);
-
-			xmpp = new XMPPTCPConnection(xmppConfig);
+			xmpp = new XMPPTCPConnection(buildXmppConfig);
 
 			// Connect to xmpp server
 			connectToServer();
@@ -231,9 +246,7 @@ public class XMPPNotificationManager {
 				LOG.debug("XMPP Manager successfully connected");
 				// Following requires a later version of the library
 				if (xmpp.isSecureConnection()) 
-					LOG.debug("XMPP Manager successfully negotiated a secure connection");
-				if (xmpp.isUsingTLS()) 
-					LOG.debug("XMPP Manager successfully negotiated a TLS connection");
+					LOG.debug("XMPP Manager successfully negotiated a TLS secured connection");
 				LOG.debug("XMPP Manager Connected"); 
 				login();
 				// Add connection listener
@@ -256,7 +269,8 @@ public class XMPPNotificationManager {
         try {
             if (xmpp.isConnected()) {
                 LOG.debug("XMPP Manager logging in");
-                xmpp.login(xmppUser, xmppPassword, XMPP_RESOURCE);
+                // Use 'null' as resourcepart argument and let the server assign a resource to us.
+                xmpp.login(xmppUser, xmppPassword, null);
                 rooms.clear();
             } else {
                 LOG.debug("XMPP Manager unable to login: Not connected to XMPP server");
@@ -300,7 +314,7 @@ public class XMPPNotificationManager {
 	 * @return true if message is sent, false otherwise
 	 */
 
-	private static class NullMessageListener implements MessageListener {
+	private static class NullMessageListener implements ChatMessageListener {
         @Override
         public void processMessage(Chat chat, Message message) {
         }
@@ -317,10 +331,11 @@ public class XMPPNotificationManager {
 	        connectToServer();
 	    }
 		try {
+		    EntityJid jid = JidCreate.entityBareFrom(xmppTo);
 		    ChatManager cm = ChatManager.getInstanceFor(xmpp);
-			cm.createChat(xmppTo, new NullMessageListener()).sendMessage(xmppMessage);
+			cm.createChat(jid, new NullMessageListener()).sendMessage(xmppMessage);
 			LOG.debug("XMPP Manager sent message to: {}", xmppTo);
-		} catch (XMPPException | NotConnectedException e) {
+		} catch (NotConnectedException | XmppStringprepException | InterruptedException e) {
 			LOG.error("XMPP Exception Sending message ", e);
 			return false;
 		}
@@ -346,15 +361,21 @@ public class XMPPNotificationManager {
 			groupChat = rooms.get(xmppChatRoom);
 		} else {
 			LOG.debug("Adding room: {}", xmppChatRoom);
-			groupChat = new MultiUserChat(xmpp, xmppChatRoom);
+			MultiUserChatManager mucm = MultiUserChatManager.getInstanceFor(xmpp);
+			try {
+				groupChat = mucm.getMultiUserChat(JidCreate.entityBareFrom(xmppChatRoom));
+			} catch (XmppStringprepException e) {
+				LOG.error("XMPP Exception creating chat room ", e);
+				return false;
+			}
 			rooms.put(xmppChatRoom, groupChat);
 		}
 
 		if (!groupChat.isJoined()) {
 			LOG.debug("Joining room: {}", xmppChatRoom);
 			try {
-				groupChat.join(xmppUser);
-			} catch (XMPPException | NoResponseException | NotConnectedException e) {
+				groupChat.join(Resourcepart.from(xmppUser));
+			} catch (XMPPException | NoResponseException | NotConnectedException | NotAMucServiceException | XmppStringprepException | InterruptedException e) {
 				LOG.error("XMPP Exception joining chat room ", e);
 				return false;
 			}
@@ -363,7 +384,7 @@ public class XMPPNotificationManager {
 		try {
 			groupChat.sendMessage(xmppMessage);
 			LOG.debug("XMPP Manager sent message to: {}", xmppChatRoom);
-		} catch (XMPPException | NotConnectedException e) {
+		} catch (NotConnectedException | InterruptedException e) {
 			LOG.error("XMPP Exception sending message to Chat room", e);
 			return false;
 		}
@@ -371,25 +392,4 @@ public class XMPPNotificationManager {
 		return true;
 	}
 
-	/**
-	 * Trusts everything.
-	 */
-	private static class LocalSSLTrustManager implements X509TrustManager {
-	    @Override
-	    public void checkClientTrusted(X509Certificate[] arg0, String arg1)
-	            throws CertificateException {
-	        // pass
-	    }
-
-	    @Override
-	    public void checkServerTrusted(X509Certificate[] arg0, String arg1)
-	            throws CertificateException {
-            // pass
-	    }
-
-	    @Override
-	    public X509Certificate[] getAcceptedIssuers() {
-	        return new X509Certificate[0];
-	    }
-	}
 }
