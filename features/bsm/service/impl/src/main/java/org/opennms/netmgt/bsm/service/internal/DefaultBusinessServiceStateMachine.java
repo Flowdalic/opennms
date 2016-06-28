@@ -452,7 +452,7 @@ public class DefaultBusinessServiceStateMachine implements BusinessServiceStateM
         m_rwLock.readLock().lock();
         try {
             final GraphVertex vertex = m_g.getVertexByBusinessServiceId(businessService.getId());
-            return GraphAlgorithms.calculateRootCause(m_g, vertex);
+            return calculateImpact(vertex);
         } finally {
             m_rwLock.readLock().unlock();
         }
